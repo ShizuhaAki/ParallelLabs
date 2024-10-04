@@ -18,6 +18,7 @@ typedef struct {
     // This is set to true in the destroy function
     int destroyed;
     int num_threads;
+    int num_active_threads;
     queue_t *task_queue;
     pthread_t *threads;
     pthread_mutex_t mutex;

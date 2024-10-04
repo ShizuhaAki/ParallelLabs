@@ -19,6 +19,7 @@ static void* threadPool_Manager(void* arg_v) {
             pthread_exit(NULL);
         }
         ThreadPool_Task* current_task;
+        pool->num_active_threads++;
         fprintf(stderr, "Thread Pool: Found pending task, dequeueing\n");
         queue_remove_head(pool->task_queue, &current_task);
         current_task = (ThreadPool_Task*)current_task;
@@ -26,6 +27,7 @@ static void* threadPool_Manager(void* arg_v) {
         fprintf(stderr, "Thread Pool: Dispatching task: %p\n",
                 current_task->arg);
         current_task->function(current_task->arg);
+        pool->num_active_threads--;
     }
 
     return NULL;
@@ -44,7 +46,7 @@ ThreadPool* ThreadPool_Init(int num_threads) {
         free(pool);
         return NULL;
     }
-    pool->destroyed = 0;
+    pool->destroyed = pool->num_active_threads = 0;
     pool->threads = (pthread_t*)malloc(num_threads * sizeof(pthread_t));
     for (int i = 0; i < num_threads; i++) {
         if (pthread_create(&pool->threads[i], NULL, threadPool_Manager,
