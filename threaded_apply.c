@@ -1,147 +1,85 @@
 #include "threaded_apply.h"
 
-#include <assert.h>
-#include <pthread.h>
-#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "thpool.h"
 
-typedef struct Task {
+typedef struct {
     int* input;
     int output;
-    // If length is smaller than this threshold, we compute serially
-    size_t serial_threshold;
-    size_t start_idx, end_idx;
+    int begin;
+    int end;
     BinaryFunction function;
-    ThreadPool* pool;
-    int computed;
-    pthread_cond_t task_cond;
-    pthread_mutex_t task_mutex;
-} Task;
+} ApplyArgs;
 
-/**
- * @brief Serially computes apply on small segments
- *
- */
-static void* serial(Task* task) {
-    int result = task->input[task->start_idx];
-    for (size_t i = task->start_idx + 1; i <= task->end_idx; i++) {
-        result = task->function(result, task->input[i]);
+static void* apply_serial(void* arg_v) {
+    ApplyArgs* arg = (ApplyArgs*)arg_v;
+    arg->output = arg->input[arg->begin];
+    if (arg->begin + 1 >= arg->end) return NULL;
+    for (int i = arg->begin + 1; i < arg->end; i++) {
+        arg->output = arg->function(arg->output, arg->input[i]);
     }
-    task->output = result;
     return NULL;
 }
 
 /**
- * @brief Performs binary divide-and-conquer merging algorithm
+ * @brief Computes the `apply` function threadedly, DOES NOT do the final
+ * combining of results
  *
- * @todo: This asks for (theoretically) infinite number of threads, which is not
- *        desirable. Can we modify it to use a finite number of threads?
+ * This function is called internally, as it only does simple (1 layer) chunking
  */
-static void* merge(void* task_v) {
-    Task* task = (Task*)task_v;
-    size_t start = task->start_idx, end = task->end_idx;
-    fprintf(stderr, "Apply %p: Received task %ld, %ld\n", task, start, end);
-    if (start == end) {
-        // no need to merge, return straightaway
-        fprintf(stderr, "Apply %p: Empty range, falling back\n", task);
-        fprintf(stderr, "Apply %p: Job complete (empty)\n", task);
-        task->output = task->input[start];
-        pthread_mutex_lock(&task->task_mutex);
-        task->computed = 1;
-        pthread_cond_signal(&task->task_cond);
-        pthread_mutex_unlock(&task->task_mutex);
-        return NULL;
-    }
-    assert(end >= start);
-    if (end - start + 1 <= task->serial_threshold) {
-        // use serial computation instead
-        fprintf(stderr, "Apply %p: Falling back to serial computation\n", task);
-        fprintf(stderr, "Apply %p: Job complete (serial)\n", task);
-        serial(task);
-        pthread_mutex_lock(&task->task_mutex);
-        task->computed = 1;
-        pthread_cond_signal(&task->task_cond);
-        pthread_mutex_unlock(&task->task_mutex);
-        return NULL;
-    }
-    size_t mid = (start + end) / 2;
-    Task left_subtask = {.input = task->input,
-                         .output = 0,
-                         .function = task->function,
-                         .start_idx = task->start_idx,
-                         .end_idx = mid,
-                         .serial_threshold = task->serial_threshold,
-                         .pool = task->pool,
-                         .computed = 0};
+#define MIN(x, y) ((x) < (y) ? (x) : (y))
+static int* apply_threaded_internal(ThreadPool* thpool, BinaryFunction function,
+                                    int* input, int size, int chunk_size,
+                                    int* num_chunks) {
+    if (size % chunk_size == 0)
+        *num_chunks = size / chunk_size;
+    else
+        *num_chunks = size / chunk_size + 1;
+    ApplyArgs* tasks = (ApplyArgs*)malloc(*num_chunks * sizeof(ApplyArgs));
+    int* output = (int*)malloc(*num_chunks * sizeof(int));
+    for (int i = 0; i < *num_chunks; i++) {
+        tasks[i].begin = i * chunk_size;
+        tasks[i].end = MIN((i + 1) * chunk_size, size);
+        tasks[i].function = function;
+        tasks[i].input = input;
+        tasks[i].output = 0;
 
-    pthread_mutex_init(&left_subtask.task_mutex, NULL);
-    pthread_cond_init(&left_subtask.task_cond, NULL);
+        ThreadPool_Task* thpool_task =
+            (ThreadPool_Task*)malloc(sizeof(ThreadPool_Task));
+        thpool_task->function = apply_serial;
+        thpool_task->arg = &tasks[i];
+        ThreadPool_AddTask(thpool, thpool_task);
+    }
+    ThreadPool_Wait(thpool);
+    for (int i = 0; i < *num_chunks; i++) output[i] = tasks[i].output;
+    free(tasks);
+    return output;
+}
 
-    Task right_subtask = {.input = task->input,
+int apply_threaded(BinaryFunction function, int* input, int size) {
+    if (size < 50) {
+        ApplyArgs args = {.input = input,
                           .output = 0,
-                          .function = task->function,
-                          .start_idx = mid + 1,
-                          .end_idx = task->end_idx,
-                          .serial_threshold = task->serial_threshold,
-                          .pool = task->pool,
-                          .computed = 0};
-
-    pthread_mutex_init(&right_subtask.task_mutex, NULL);
-    pthread_cond_init(&right_subtask.task_cond, NULL);
-
-    ThreadPool_Task left_subtask_thread = {.arg = &left_subtask,
-                                           .function = merge};
-    ThreadPool_Task right_subtask_thread = {.arg = &right_subtask,
-                                            .function = merge};
-    fprintf(stderr,
-            "Apply %p: Submitted task %lu, %lu; %lu, %lu; addr is %p, %p\n",
-            task, left_subtask.start_idx, left_subtask.end_idx,
-            right_subtask.start_idx, right_subtask.end_idx,
-            &left_subtask_thread, &right_subtask_thread);
-    fprintf(stderr, "Apply %p: waiting left\n", task);
-    // Wait for the left subtask to complete
-    pthread_mutex_lock(&left_subtask.task_mutex);
-    ThreadPool_AddTask(task->pool, &left_subtask_thread);
-    while (!left_subtask.computed)
-        pthread_cond_wait(&left_subtask.task_cond, &left_subtask.task_mutex);
-    pthread_mutex_unlock(&left_subtask.task_mutex);
-    fprintf(stderr, "Apply %p: received left, waiting right\n", task);
-    // Wait for the right subtask to complete
-    pthread_mutex_lock(&right_subtask.task_mutex);
-    ThreadPool_AddTask(task->pool, &right_subtask_thread);
-    while (!right_subtask.computed)
-        pthread_cond_wait(&right_subtask.task_cond, &right_subtask.task_mutex);
-    pthread_mutex_unlock(&right_subtask.task_mutex);
-    fprintf(stderr, "Apply %p: received right\n", task);
-    task->output = task->function(left_subtask.output, right_subtask.output);
-    pthread_mutex_lock(&task->task_mutex);
-    task->computed = 1;
-    pthread_cond_signal(&task->task_cond);
-    pthread_mutex_unlock(&task->task_mutex);
-    fprintf(stderr, "Apply %p: Job complete\n", task);
-    return NULL;
-}
-
-int apply_threaded(BinaryFunction function, int* input, size_t size) {
-    Task task = {.input = input,
-                 .start_idx = 0,
-                 .end_idx = size - 1,
-                 .serial_threshold = 10,  // Modify this for best result
-                 .function = function,
-                 .output = 0,
-                 .pool = ThreadPool_Init(8),
-                 .computed = 0};
-    merge(&task);
-    pthread_mutex_lock(&task.task_mutex);
-    while (!task.computed) {
-        pthread_cond_wait(&task.task_cond, &task.task_mutex);
+                          .function = function,
+                          .begin = 0,
+                          .end = size};
+        apply_serial(&args);
+        return args.output;
     }
-    pthread_mutex_unlock(&task.task_mutex);
-
-    // Clean up resources
-    pthread_mutex_destroy(&task.task_mutex);
-    pthread_cond_destroy(&task.task_cond);
-    ThreadPool_Destroy(task.pool);
-    return task.output;
+    ThreadPool* thpool = ThreadPool_Init(THREAD_NUM);
+    int *array, *array_temp;
+    array = (int*)malloc(size * sizeof(int));
+    memcpy(array, input, size * sizeof(int));
+    while (size >= THREAD_NUM) {
+        array_temp =
+            apply_threaded_internal(thpool, function, array, size, 8, &size);
+        free(array);
+        array = array_temp;
+    }
+    int ans = array[0];
+    for (int i = 1; i < size; i++) ans = function(ans, array[i]);
+    ThreadPool_Destroy(thpool);
+    return ans;
 }

@@ -5,7 +5,7 @@
 #include "def.h"
 #include "queue.h"
 
-#define TASKQUEUE_MAXSIZE 1000
+#define TASKQUEUE_MAXSIZE 100000000
 
 typedef void *(*ThreadPool_Function)(void *);
 
@@ -18,11 +18,12 @@ typedef struct {
     // This is set to true in the destroy function
     int destroyed;
     int num_threads;
-    int num_active_threads;
+    int num_pending_tasks;
     queue_t *task_queue;
     pthread_t *threads;
     pthread_mutex_t mutex;
     pthread_cond_t cond;
+    pthread_cond_t all_tasks_done;
 } ThreadPool;
 
 /**
@@ -52,4 +53,7 @@ int ThreadPool_AddTask(ThreadPool *pool, ThreadPool_Task *task);
  */
 void ThreadPool_Destroy(ThreadPool *pool);
 
+int ThreadPool_GetNumThreads(ThreadPool *pool);
+
+void ThreadPool_Wait(ThreadPool *pool);
 #endif

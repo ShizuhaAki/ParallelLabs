@@ -13,16 +13,9 @@ int fs(int x) { return x * 2; }
 int f(int x) { return (int)exp(x); }
 int g(int x, int y) { return x + y; }
 
-int complex_g(int x, int y) {
-    const int P = 998244353;
-    int res1 = x, res2 = y;
-    for (int i = 0; i < y; i++) {
-        res1 = 1ll * res1 * x % P;
-    }
-    for (int i = 0; i < x; i++) {
-        res2 = 1ll * res2 * y % P;
-    }
-    return (1ll * res1 + 1ll * res2) % P;
+int gg(int x, int y) {
+    for (int i = 0; i < y; i++) x = (x + 1) % 998244353;
+    return x;
 }
 
 int n;
@@ -30,9 +23,10 @@ int n;
 int a[N];
 int ans[N];
 int out[N];
+int dump_testcase;
 
 void create_test(int n) {
-    for (int i = 0; i < n; i++) a[i] = rand() % 100000;
+    for (int i = 0; i < n; i++) a[i] = rand() % 10000 + 1;
 }
 
 void map_serial(Function function, int* input, int* output, size_t size) {
@@ -84,14 +78,18 @@ void apply_test(int n, int max_tests) {
         printf("Test %d:\n", test_id);
         struct timeval stop, start;
         create_test(n);
+        if (dump_testcase) {
+            for (int i = 0; i < n; i++) printf("%d ", a[i]);
+            printf("\n");
+        }
         gettimeofday(&start, NULL);
-        int apply_ans = apply_serial(&complex_g, a, n);
+        int apply_ans = apply_serial(&gg, a, n);
         gettimeofday(&stop, NULL);
         unsigned long time_serial = (stop.tv_sec - start.tv_sec) * 1000000 +
                                     stop.tv_usec - start.tv_usec;
         printf("\tSerial apply took %lu us\n", time_serial);
         gettimeofday(&start, NULL);
-        int apply_output = apply_threaded(&complex_g, a, n);
+        int apply_output = apply_threaded(&gg, a, n);
         gettimeofday(&stop, NULL);
         unsigned long time_threaded = (stop.tv_sec - start.tv_sec) * 1000000 +
                                       stop.tv_usec - start.tv_usec;
@@ -113,7 +111,7 @@ int main(int argc, char* argv[]) {
     int t = 0;  // 0 = map, 1 = apply
 
     int opt;
-    while ((opt = getopt(argc, argv, "n:m:t:")) != -1) {
+    while ((opt = getopt(argc, argv, "n:m:t:s:d")) != -1) {
         switch (opt) {
             case 'n':
                 n = atoi(optarg);
@@ -123,6 +121,12 @@ int main(int argc, char* argv[]) {
                 break;
             case 't':
                 t = atoi(optarg);
+                break;
+            case 's':
+                srand(atoi(optarg));
+                break;
+            case 'd':
+                dump_testcase = 1;
                 break;
             default:
                 fprintf(stderr,
